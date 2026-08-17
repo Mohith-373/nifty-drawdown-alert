@@ -1,0 +1,39 @@
+# Environment and secrets
+.env
+.env.local
+.env.production
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# Runtime data
+data/*.db
+logs/*.log
+
+# Test / cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Task scheduler XML (contains local paths)
+task_monitor.xml
+task_assistant.xml
+
+# Generated files
+RUNNING.md
+backtest_crossings.json
