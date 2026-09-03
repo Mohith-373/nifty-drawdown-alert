@@ -2,6 +2,7 @@
 .env
 .env.local
 .env.production
+.env.prod
 
 # Python
 __pycache__/
@@ -37,3 +38,6 @@ task_assistant.xml
 # Generated files
 RUNNING.md
 backtest_crossings.json
+
+# Local Windows startup script (machine-specific paths)
+start_services.bat

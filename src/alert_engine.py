@@ -1,15 +1,8 @@
 """
-Alert Engine - orchestrates one full evaluation cycle:
+Alert Engine - orchestrates one full evaluation cycle.
 
-  Market Data Provider
-        -> Price Service (validate)
-        -> High Calculator (52-week high)
-        -> Drawdown Calculator
-        -> Threshold Engine / Alert State Manager
-        -> Notification Service
-
-This is the only module that wires all the pieces together; each piece
-above remains independently unit-testable in isolation.
+Production-grade: every database and notification operation is wrapped
+in try/except so a single failure never crashes the cycle.
 """
 from __future__ import annotations
 
@@ -40,36 +33,65 @@ class AlertEngine:
         self._min_threshold = min_configured_threshold
 
     def run_once(self) -> dict:
-        """
-        Execute a single evaluation cycle. Returns a summary dict for
-        logging/testing. Never raises for expected failure modes (market
-        data errors) - those are caught, logged, and recorded to error_log.
-        """
         try:
             quote = self._price_service.get_validated_quote()
         except MarketDataError as e:
             logger.warning("Skipping cycle: %s", e)
-            self._db.record_error("PriceService", str(e))
+            try:
+                self._db.record_error("PriceService", str(e))
+            except Exception:
+                logger.exception("Failed to record PriceService error to database")
             return {"status": "skipped", "reason": str(e)}
+        except Exception as e:
+            logger.exception("Unexpected error fetching quote")
+            try:
+                self._db.record_error("PriceService", f"Unexpected: {e}")
+            except Exception:
+                pass
+            return {"status": "skipped", "reason": f"Unexpected: {e}"}
 
         try:
             high_value = self._high_calculator.get_current_high_value(as_of=quote.timestamp)
         except MarketDataError as e:
             logger.warning("Skipping cycle: could not determine 52-week high: %s", e)
-            self._db.record_error("HighCalculator", str(e))
+            try:
+                self._db.record_error("HighCalculator", str(e))
+            except Exception:
+                logger.exception("Failed to record HighCalculator error to database")
             return {"status": "skipped", "reason": str(e)}
+        except Exception as e:
+            logger.exception("Unexpected error fetching 52-week high")
+            try:
+                self._db.record_error("HighCalculator", f"Unexpected: {e}")
+            except Exception:
+                pass
+            return {"status": "skipped", "reason": f"Unexpected: {e}"}
 
         drawdown_pct = calculate_drawdown_pct(quote.price, high_value)
 
-        self._db.record_price(
-            price=quote.price,
-            price_timestamp=quote.timestamp.isoformat(),
-            fetched_at=quote.fetched_at.isoformat(),
-            drawdown_pct=drawdown_pct,
-            source=quote.source,
-        )
+        try:
+            self._db.record_price(
+                price=quote.price,
+                price_timestamp=quote.timestamp.isoformat(),
+                fetched_at=quote.fetched_at.isoformat(),
+                drawdown_pct=drawdown_pct,
+                source=quote.source,
+            )
+        except Exception:
+            logger.exception("Failed to record price to database")
 
-        decision = self._state_manager.decide(drawdown_pct)
+        try:
+            decision = self._state_manager.decide(drawdown_pct)
+        except Exception:
+            logger.exception("Failed to get threshold decision — skipping alert evaluation")
+            return {
+                "status": "ok",
+                "price": quote.price,
+                "fifty_two_week_high": high_value,
+                "drawdown_pct": drawdown_pct,
+                "alerts_sent": [],
+                "rearmed": [],
+            }
 
         alerts_sent = []
         for threshold in decision.thresholds_to_trigger:
@@ -82,23 +104,32 @@ class AlertEngine:
                 price_timestamp=quote.timestamp,
                 is_first_alert=is_first,
             )
-            alert_id = self._db.record_alert(
-                threshold=threshold,
-                nifty_price=quote.price,
-                high_value=high_value,
-                drawdown_pct=drawdown_pct,
-                price_timestamp=quote.timestamp.isoformat(),
-                is_first_alert=is_first,
-                message=message,
-            )
-            self._notification_service.notify_all(alert_id, message, subject="NIFTY 50 Drawdown Alert")
+            try:
+                alert_id = self._db.record_alert(
+                    threshold=threshold,
+                    nifty_price=quote.price,
+                    high_value=high_value,
+                    drawdown_pct=drawdown_pct,
+                    price_timestamp=quote.timestamp.isoformat(),
+                    is_first_alert=is_first,
+                    message=message,
+                )
+            except Exception:
+                logger.exception("Failed to record alert for threshold %s", threshold)
+                alert_id = -1
+
+            try:
+                self._notification_service.notify_all(alert_id, message, subject="NIFTY 50 Drawdown Alert")
+            except Exception:
+                logger.exception("Failed to send notifications for threshold %s", threshold)
+
             alerts_sent.append(threshold)
             logger.info("Alert fired: threshold=%s%% drawdown=%.2f%%", threshold, drawdown_pct)
 
-        # Persist state ONLY after notifications have been attempted, so a
-        # crash between decision and notification does not silently mark a
-        # threshold as triggered without ever notifying anyone.
-        self._state_manager.apply_decision(decision, drawdown_pct)
+        try:
+            self._state_manager.apply_decision(decision, drawdown_pct)
+        except Exception:
+            logger.exception("Failed to persist state after decision")
 
         return {
             "status": "ok",

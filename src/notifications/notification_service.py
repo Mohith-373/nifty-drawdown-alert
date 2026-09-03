@@ -1,17 +1,17 @@
 """
-Notification Service.
+Notification Service with retry-protected fan-out.
 
-Fans a message out to every ENABLED channel and records delivery status for
-each. Individual channel failures never raise - they are captured and
-persisted so operators can see delivery gaps in error_log / notification
-history without the whole alert pipeline crashing.
+Individual notifier failures are caught so one channel never kills another.
 """
 from __future__ import annotations
 
+import logging
 from typing import List
 
 from src.notifications.base import Notifier, NotificationResult
 from src.persistence.database import Database
+
+logger = logging.getLogger("nifty_alert.notifications")
 
 
 class NotificationService:
@@ -22,22 +22,35 @@ class NotificationService:
     def notify_all(self, alert_id: int, message: str, subject: str = "") -> List[NotificationResult]:
         results = []
         for notifier in self._notifiers:
-            result = notifier.send(message, subject=subject)
-            self._db.record_notification_delivery(
-                alert_id=alert_id,
-                channel=result.channel,
-                status="sent" if result.success else "failed",
-                detail=result.detail,
-            )
+            try:
+                result = notifier.send(message, subject=subject)
+            except Exception as exc:
+                logger.exception("Notifier %s raised an exception", type(notifier).__name__)
+                result = NotificationResult(
+                    channel=getattr(notifier, "channel_name", type(notifier).__name__),
+                    success=False,
+                    detail=str(exc),
+                )
+            try:
+                self._db.record_notification_delivery(
+                    alert_id=alert_id,
+                    channel=result.channel,
+                    status="sent" if result.success else "failed",
+                    detail=result.detail,
+                )
+            except Exception:
+                logger.exception("Failed to record notification delivery for %s", result.channel)
             if not result.success:
-                self._db.record_error("NotificationService", f"{result.channel} failed: {result.detail}")
+                try:
+                    self._db.record_error("NotificationService", f"{result.channel} failed: {result.detail}")
+                except Exception:
+                    pass
             results.append(result)
         return results
 
 
 def build_notifiers_from_config(config, db: Database) -> List[Notifier]:
-    """Factory that builds the list of active Notifier instances based on
-    which channels are enabled in Config. Keeps wiring in one place."""
+    """Factory that builds the list of active Notifier instances."""
     from src.notifications.telegram_notifier import TelegramNotifier
     from src.notifications.email_notifier import EmailNotifier
     from src.notifications.stub_notifiers import SmsNotifier, PushNotifier

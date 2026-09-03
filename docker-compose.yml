@@ -1,0 +1,31 @@
+# NIFTY 50 Drawdown Alert System - Docker Compose
+# Usage: docker compose up -d --build
+services:
+  nifty-alert:
+    build: .
+    container_name: nifty-drawdown-alert
+    restart: unless-stopped
+    env_file:
+      - .env.prod
+    environment:
+      - DATABASE_PATH=/app/data/nifty_alerts.db
+      - LOG_FILE=/app/logs/app.log
+      - NSE_HOLIDAY_FILE=config/nse_holidays.json
+    volumes:
+      - nifty_data:/app/data
+      - nifty_logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "/app/health_check.py"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  nifty_data:
+  nifty_logs:

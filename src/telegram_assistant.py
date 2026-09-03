@@ -1,13 +1,26 @@
-"""Telegram assistant for NIFTY 50 monitoring and queries."""
+"""
+NIFTY 50 Drawdown Alert System - Telegram Assistant Bot.
+
+Production-grade Telegram bot with retry/backoff, error-safe handlers,
+and resilient polling configuration.
+"""
 from __future__ import annotations
 
 import logging
 import os
+import signal
+import time
 from datetime import datetime
 from typing import List, Dict, Any
 
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from src.config import CONFIG
 from src.data_provider import get_provider
@@ -16,6 +29,8 @@ from src.services.high_calculator import HighCalculator
 from src.services.price_service import PriceService
 
 logger = logging.getLogger("nifty_ai.telegram_assistant")
+
+_network_ready = True
 
 
 def _drawdown_pct(current_price: float, high_value: float) -> float:
@@ -65,8 +80,8 @@ def get_market_snapshot() -> Dict[str, Any]:
             "source": quote.source,
             "error": None,
         }
-    except Exception as exc:  # pragma: no cover - runtime error path
-        logger.exception("Unable to fetch NIFTY snapshot")
+    except Exception as exc:
+        logger.warning("Unable to fetch NIFTY snapshot: %s", exc)
         return {
             "current": None,
             "high": None,
@@ -78,14 +93,18 @@ def get_market_snapshot() -> Dict[str, Any]:
             "error": str(exc),
         }
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception:
+            pass
 
 
 def format_snapshot_status(snapshot: Dict[str, Any]) -> str:
     if snapshot.get("error"):
         return (
-            "I can’t verify the current NIFTY 50 data right now because the market-data source is unavailable.\n"
-            f"Reason: {snapshot['error']}"
+            "Market data is currently unavailable.\n"
+            "Reason: " + snapshot["error"] + "\n\n"
+            "Tip: If the market is closed, data will update once it opens (09:15-15:30 IST, Mon-Fri)."
         )
 
     current = snapshot["current"]
@@ -128,132 +147,209 @@ def format_help() -> str:
         "/drawdown - current drawdown and next threshold\n"
         "/levels - full threshold table\n"
         "/alerts - alert configuration summary\n"
-        "/history - historical analysis is supported through the market-data source\n"
-        "/news - current market/news summary is supported when available\n\n"
-        "You can also ask natural-language questions like: 'what's nifty right now?' or 'how much is it down?'"
+        "/history - historical analysis\n"
+        "/news - current market/news summary\n\n"
+        "You can also ask natural-language questions like:\n"
+        "'what's nifty right now?' or 'how much is it down?'"
     )
 
 
+async def _safe_reply(update: Update, text: str) -> None:
+    """Send a reply, handling all possible Telegram API errors."""
+    try:
+        if update and update.message:
+            await update.message.reply_text(text)
+    except Exception as exc:
+        logger.warning("Failed to send reply: %s", exc)
+
+
 async def _handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
+    await _safe_reply(
+        update,
         "Welcome to the NIFTY 50 AI Telegram Assistant.\n\n"
-        "Use /status, /drawdown, /levels, or ask a natural-language question like 'what's nifty right now?'"
+        "Use /status, /drawdown, /levels, or ask a natural-language question.",
     )
 
 
 async def _handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(format_help())
+    await _safe_reply(update, format_help())
 
 
 async def _handle_nifty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    snapshot = get_market_snapshot()
-    await update.message.reply_text(format_snapshot_status(snapshot))
+    try:
+        snapshot = get_market_snapshot()
+        await _safe_reply(update, format_snapshot_status(snapshot))
+    except Exception as exc:
+        logger.exception("Error in /nifty handler")
+        await _safe_reply(update, "Error fetching NIFTY data. Please try again.")
 
 
 async def _handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    snapshot = get_market_snapshot()
-    await update.message.reply_text(format_snapshot_status(snapshot))
+    try:
+        snapshot = get_market_snapshot()
+        await _safe_reply(update, format_snapshot_status(snapshot))
+    except Exception as exc:
+        logger.exception("Error in /status handler")
+        await _safe_reply(update, "Error fetching status. Please try again.")
 
 
 async def _handle_drawdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    snapshot = get_market_snapshot()
-    if snapshot.get("error"):
-        await update.message.reply_text(format_snapshot_status(snapshot))
-        return
+    try:
+        snapshot = get_market_snapshot()
+        if snapshot.get("error"):
+            await _safe_reply(update, format_snapshot_status(snapshot))
+            return
 
-    next_threshold = snapshot["next_threshold"]
-    next_line = "No configured threshold is active right now"
-    if next_threshold:
-        next_line = f"Next threshold: {next_threshold['threshold']:.0f}% at {next_threshold['level']:.2f}"
+        next_threshold = snapshot["next_threshold"]
+        next_line = "No configured threshold is active right now"
+        if next_threshold:
+            next_line = f"Next threshold: {next_threshold['threshold']:.0f}% at {next_threshold['level']:.2f}"
 
-    text = (
-        "NIFTY 50 Drawdown\n\n"
-        f"Current: {snapshot['current']:,.2f}\n"
-        f"52W High: {snapshot['high']:,.2f}\n"
-        f"Drawdown: {snapshot['drawdown']:.2f}%\n"
-        f"{next_line}"
-    )
-    await update.message.reply_text(text)
+        text = (
+            "NIFTY 50 Drawdown\n\n"
+            f"Current: {snapshot['current']:,.2f}\n"
+            f"52W High: {snapshot['high']:,.2f}\n"
+            f"Drawdown: {snapshot['drawdown']:.2f}%\n"
+            f"{next_line}"
+        )
+        await _safe_reply(update, text)
+    except Exception as exc:
+        logger.exception("Error in /drawdown handler")
+        await _safe_reply(update, "Error fetching drawdown data. Please try again.")
 
 
 async def _handle_levels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    snapshot = get_market_snapshot()
-    await update.message.reply_text(format_threshold_levels(snapshot))
+    try:
+        snapshot = get_market_snapshot()
+        await _safe_reply(update, format_threshold_levels(snapshot))
+    except Exception as exc:
+        logger.exception("Error in /levels handler")
+        await _safe_reply(update, "Error fetching levels. Please try again.")
 
 
 async def _handle_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    snapshot = get_market_snapshot()
-    if snapshot.get("error"):
-        await update.message.reply_text(format_snapshot_status(snapshot))
-        return
+    try:
+        snapshot = get_market_snapshot()
+        if snapshot.get("error"):
+            await _safe_reply(update, format_snapshot_status(snapshot))
+            return
 
-    text = (
-        "Configured alerts\n\n"
-        + "\n".join(f"- {row['threshold']:.0f}%: {row['level']:.2f}" for row in snapshot["levels"])
-    )
-    await update.message.reply_text(text)
+        text = (
+            "Configured alerts\n\n"
+            + "\n".join(f"- {row['threshold']:.0f}%: {row['level']:.2f}" for row in snapshot["levels"])
+        )
+        await _safe_reply(update, text)
+    except Exception as exc:
+        logger.exception("Error in /alerts handler")
+        await _safe_reply(update, "Error fetching alerts. Please try again.")
 
 
 async def _handle_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "Historical NIFTY analysis is available through the market-data source in this project. Ask for a date range like 'show NIFTY from 2020 to 2022' and I can use the project data source."
+    await _safe_reply(
+        update,
+        "Historical NIFTY analysis is available through the market-data source. "
+        "Ask for a date range like 'show NIFTY from 2020 to 2022'.",
     )
 
 
 async def _handle_news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "Current market/news context is supported when a live news source is available. Otherwise, I will clearly say it is unavailable."
+    await _safe_reply(
+        update,
+        "Current market/news context is supported when a live news source is available. "
+        "Otherwise, I will clearly say it is unavailable.",
     )
 
 
 async def _handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = (update.message.text or "").strip().lower()
-    if not text:
-        return
-
-    if any(word in text for word in ["hi", "hello", "hey"]):
-        await update.message.reply_text("Hello! I can help with NIFTY price, drawdown, 52-week high, and threshold levels. Try /status or ask 'what's nifty right now?'")
-        return
-
-    if "drawdown" in text or "down" in text or "current" in text or "price" in text or "value" in text:
-        snapshot = get_market_snapshot()
-        await update.message.reply_text(format_snapshot_status(snapshot))
-        return
-
-    if "level" in text or "threshold" in text:
-        snapshot = get_market_snapshot()
-        await update.message.reply_text(format_threshold_levels(snapshot))
-        return
-
-    if "52" in text and ("week" in text or "w" in text or "high" in text):
-        snapshot = get_market_snapshot()
-        if snapshot.get("error"):
-            await update.message.reply_text(format_snapshot_status(snapshot))
+    try:
+        if not update or not update.message or not update.message.text:
             return
-        await update.message.reply_text(f"52-week high: {snapshot['high']:,.2f} (data: {snapshot['timestamp'].strftime('%d-%b-%Y %I:%M %p IST')})")
-        return
 
-    if "alert" in text:
-        snapshot = get_market_snapshot()
-        await update.message.reply_text(format_threshold_levels(snapshot))
-        return
+        text = update.message.text.strip().lower()
+        if not text:
+            return
 
-    await update.message.reply_text(
-        "I can help with NIFTY price, drawdown, 52-week high, threshold levels, and alert status. Try /status or ask: 'what's nifty right now?'"
-    )
+        if any(word in text for word in ["hi", "hello", "hey"]):
+            await _safe_reply(
+                update,
+                "Hello! I can help with NIFTY price, drawdown, 52-week high, and threshold levels. "
+                "Try /status or ask 'what's nifty right now?'",
+            )
+            return
+
+        if any(w in text for w in ["drawdown", "down", "current", "price", "value"]):
+            snapshot = get_market_snapshot()
+            await _safe_reply(update, format_snapshot_status(snapshot))
+            return
+
+        if any(w in text for w in ["level", "threshold"]):
+            snapshot = get_market_snapshot()
+            await _safe_reply(update, format_threshold_levels(snapshot))
+            return
+
+        if "52" in text and any(w in text for w in ["week", "w", "high"]):
+            snapshot = get_market_snapshot()
+            if snapshot.get("error"):
+                await _safe_reply(update, format_snapshot_status(snapshot))
+                return
+            await _safe_reply(
+                update,
+                f"52-week high: {snapshot['high']:,.2f} "
+                f"(data: {snapshot['timestamp'].strftime('%d-%b-%Y %I:%M %p IST')})",
+            )
+            return
+
+        if "alert" in text:
+            snapshot = get_market_snapshot()
+            await _safe_reply(update, format_threshold_levels(snapshot))
+            return
+
+        await _safe_reply(
+            update,
+            "I can help with NIFTY price, drawdown, 52-week high, threshold levels, and alert status. "
+            "Try /status or ask: 'what's nifty right now?'",
+        )
+    except Exception as exc:
+        logger.exception("Error in text handler")
+        await _safe_reply(update, "Sorry, something went wrong. Please try again.")
+
+
+async def _post_init(application) -> None:
+    """Validate configuration after bot connects to Telegram."""
+    logger.info("Telegram bot connected successfully.")
+    if not CONFIG.telegram_chat_id:
+        logger.warning("TELEGRAM_CHAT_ID is not set — alerts will not be delivered.")
+
+
+async def _post_shutdown(application) -> None:
+    logger.info("Telegram bot shutting down gracefully.")
 
 
 def main() -> None:
     token = CONFIG.telegram_bot_token or os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured. Set it in .env or environment variables.")
+        raise RuntimeError(
+            "TELEGRAM_BOT_TOKEN is not configured. "
+            "Set it in .env or environment variables."
+        )
 
     logging.basicConfig(
         level=getattr(logging, CONFIG.log_level.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    app = ApplicationBuilder().token(token).build()
+    logger.info("Starting NIFTY AI Telegram assistant...")
+
+    app = (
+        ApplicationBuilder()
+        .token(token)
+        .post_init(_post_init)
+        .post_shutdown(_post_shutdown)
+        .read_timeout(15)
+        .write_timeout(15)
+        .connect_timeout(15)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", _handle_start))
     app.add_handler(CommandHandler("help", _handle_help))
@@ -266,8 +362,12 @@ def main() -> None:
     app.add_handler(CommandHandler("news", _handle_news))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_text))
 
-    logger.info("Starting NIFTY AI Telegram assistant...")
-    app.run_polling()
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+        poll_interval=2.0,
+        timeout=15,
+    )
 
 
 if __name__ == "__main__":

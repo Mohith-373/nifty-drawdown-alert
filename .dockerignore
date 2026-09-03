@@ -1,0 +1,40 @@
+# Secrets - never build into image
+.env
+.env.prod
+.env.local
+.env.production
+
+# Local data & logs
+data/
+logs/
+*.db
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Test / tooling
+.pytest_cache/
+.coverage
+htmlcov/
+tests/
+
+# SCM / OS
+.git/
+.gitignore
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Temp / generated
+RUNNING.md
+backtest_crossings.json
+task_monitor.xml
+task_assistant.xml
+start_services.bat
+requirements-dev.txt
+backtest.py
+verify_backtest.py
