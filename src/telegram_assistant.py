@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import threading
 import time
 from datetime import datetime
 from typing import List, Dict, Any
@@ -325,6 +326,31 @@ async def _post_shutdown(application) -> None:
     logger.info("Telegram bot shutting down gracefully.")
 
 
+def _touch_heartbeat(path: str) -> None:
+    """Write current time to a heartbeat file so a container healthcheck can
+    confirm the assistant is alive."""
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w") as f:
+            f.write(str(time.time()))
+    except Exception:
+        logger.debug("Could not write heartbeat file %s", path)
+
+
+def _start_heartbeat() -> None:
+    """Start a background thread that refreshes the heartbeat file."""
+    path = os.getenv("ASSISTANT_HEARTBEAT_FILE", "/app/data/assistant.heartbeat")
+
+    def _loop():
+        interval = 20
+        while True:
+            _touch_heartbeat(path)
+            time.sleep(interval)
+
+    t = threading.Thread(target=_loop, daemon=True, name="assistant-heartbeat")
+    t.start()
+
+
 def main() -> None:
     token = CONFIG.telegram_bot_token or os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -339,6 +365,8 @@ def main() -> None:
     )
 
     logger.info("Starting NIFTY AI Telegram assistant...")
+
+    _start_heartbeat()
 
     app = (
         ApplicationBuilder()

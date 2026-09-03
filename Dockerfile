@@ -20,6 +20,8 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 # Copy the application
 COPY src/ src/
 COPY config/ config/
+COPY nifty_ai_telegram_assistant.py .
+COPY assistant_health_check.py .
 
 # Volumes: persistent data and logs
 RUN mkdir -p /app/data /app/logs

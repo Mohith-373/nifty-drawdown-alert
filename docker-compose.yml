@@ -26,6 +26,31 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  nifty-assistant:
+    build: .
+    container_name: nifty-telegram-assistant
+    restart: unless-stopped
+    command: ["python", "-u", "nifty_ai_telegram_assistant.py"]
+    env_file:
+      - .env.prod
+    environment:
+      - DATABASE_PATH=/app/data/nifty_alerts.db
+      - ASSISTANT_HEARTBEAT_FILE=/app/data/assistant.heartbeat
+    volumes:
+      - nifty_data:/app/data
+      - nifty_logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "/app/assistant_health_check.py"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   nifty_data:
   nifty_logs:
