@@ -144,6 +144,12 @@ defaults and comments. Key ones:
 
 ## Deployment
 
+> **Ready to run 24/7 in the cloud?** See the complete step-by-step guide:
+> [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). The repo ships a production-ready
+> `docker-compose.yml` that runs **both** the drawdown monitor and the Telegram
+> assistant as self-healing containers (`restart: unless-stopped`, healthchecks,
+> persistent volumes) — deployable to any always-on Linux VPS.
+
 ### Option A — systemd (Linux VM)
 
 Create `/etc/systemd/system/nifty-alert.service`:
@@ -173,24 +179,25 @@ sudo systemctl enable --now nifty-alert
 Because all alert state lives in SQLite, restarts (crash, redeploy, reboot) are
 safe — no duplicate alerts, no lost history.
 
-### Option B — Docker
+### Option B — Docker (recommended for 24/7)
 
-```dockerfile
-FROM python:3.11-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
-CMD ["python", "-m", "src.main"]
-```
+The repo's `docker-compose.yml` builds **one image** and runs **two** services,
+both with `restart: unless-stopped`, healthchecks, and persistent volumes:
+
+- `nifty-alert` — the drawdown monitor (`src.main`)
+- `nifty-assistant` — the interactive Telegram assistant
 
 ```bash
-docker build -t nifty-alert .
-docker run -d --env-file .env -v $(pwd)/data:/app/data -v $(pwd)/logs:/app/logs nifty-alert
+# secrets live in a gitignored .env.prod (see .env.example)
+cp .env.example .env.prod        # then fill in your real values
+
+docker compose up -d --build
+docker compose ps                # both should be Up (healthy)
 ```
 
-Mount `./data` and `./logs` as volumes so state and logs survive container
-restarts/redeploys.
+`./data` and `./logs` are named volumes, so state (SQLite DB, alert arm/disarm
+history) and logs survive container restarts, redeploys, and host reboots. See
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the full cloud setup.
 
 ### Option C — cron-driven (instead of a long-running loop)
 
